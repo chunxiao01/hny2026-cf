@@ -36,7 +36,7 @@ const shouldShowImage = (index: number): boolean => {
   return currentPlayingIndex.value !== index;
 };
 
-const onSlideChange = (swiper) => {
+const onSlideChange = (swiper:any) => {
   if(isMenuOpen.value){
     isMenuOpen.value = false;
   }
@@ -52,7 +52,7 @@ const onSlideChange = (swiper) => {
   replayTargetIndex.value = null;
 };
 
-const onSlideTransitionStart = (swiper) => {
+const onSlideTransitionStart = (swiper:any) => {
   currentMediaIndex.value = swiper?.realIndex || 0;
 };
 
