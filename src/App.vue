@@ -3,16 +3,20 @@ import { ref, computed, onMounted, onUnmounted,nextTick } from 'vue';
 
 import { Swiper, SwiperSlide } from 'swiper/vue';
 import { Pagination } from 'swiper/modules';
+import type { Swiper as SwiperType } from 'swiper/types';
 import 'swiper/css';
 import 'swiper/css/pagination';
 
-
+//开启/关闭菜单
 const isMenuOpen = ref(false);
+//开启/关闭自动播放
 const isAutoPlayEnabled = ref(true);
-
+//媒体资源列表
 const mediaItems = ref([
   { 
+    //图片路径
     imageSrc: new URL('./assets/media/1.webp', import.meta.url).href,
+    //视频路径
     videoSrc: new URL('./assets/media/1.mp4', import.meta.url).href,
   },
   { 
@@ -21,127 +25,276 @@ const mediaItems = ref([
   },
 ]);
 
+//swiper模块列表
 const modules = [Pagination];
-
+//当前展示的媒体索引
 const currentMediaIndex = ref(0);
+//当前正在播放的视频索引
 const currentPlayingIndex = ref<number | null>(0);
-const replayTargetIndex = ref(null);
-const shouldShowImage = (index: number): boolean => {
-  if(replayTargetIndex.value === index) {
+//需要重播的视频索引
+const replayTargetIndex = ref<number | null>(null);
+//视频对象
+const videoRefs = ref<(HTMLVideoElement | null)[]>([]);
+//swiper实例
+const swiperInstance = ref<SwiperType | null>(null);
+//视频加载状态
+const videoLoadStatus = ref<{ [key: number]: 'idle' | 'loading' | 'loaded' | 'error' }>({});
+//重播控制器
+let replayAbortController: AbortController | null = null;
+//用户是否已经与轮播交互过
+const userHasInteracted = ref<boolean>(false);
+//当前 Swiper 显示的卡片索引
+const currentSlideIndex = ref<number>(0);
+//记录视频是否已播放完成
+const videoEndedState = ref<{ [key: number]: boolean }>({});
+
+//显示与隐藏视频和图片
+const shouldShowVideo = (index: number): boolean => {
+  // 1. 必须是当前显示的卡片
+  if (index !== currentSlideIndex.value) {
     return false;
   }
-  if (!isAutoPlayEnabled.value) {
-    return true;
+  // 2. 用户必须已交互
+  if (!userHasInteracted.value) {
+    return false;
   }
-  return currentPlayingIndex.value !== index;
+  // 3. 自动播放必须开启 (规则 1, 2)
+  if (!isAutoPlayEnabled.value) {
+    return false;
+  }
+  // 4. 视频加载必须成功
+  if (videoLoadStatus.value[index] === 'error') {
+    return false;
+  }
+  // 5. 视频尚未播放完成 (规则 1, 2, 3)
+  // 如果视频已经播放结束，即使自动播放开启，也应该显示图片
+  return !videoEndedState.value[index];
 };
 
-const onSlideChange = (swiper:any) => {
-  if(isMenuOpen.value){
-    isMenuOpen.value = false;
+//用户交互
+const onUserInteraction = () => {
+  if (!userHasInteracted.value) {
+    userHasInteracted.value = true; // 标记用户已交互
+    // 用户交互后，如果自动播放开启，尝试播放当前卡片视频
+    tryPlayCurrentVideo();
   }
-  const newIndex = swiper.realIndex;
-  if (currentPlayingIndex.value !== null && currentPlayingIndex.value !== newIndex) {
-    currentPlayingIndex.value = newIndex;
-  } else if (currentPlayingIndex.value === null) {
-    if (isAutoPlayEnabled.value) {
-      currentPlayingIndex.value = newIndex;
+};
+
+//视频播放
+const tryPlayCurrentVideo = async () => {
+  //用户未交互或者未开启自动播放
+  if (!userHasInteracted.value || !isAutoPlayEnabled.value) {
+    return; // 不满足播放条件
+  }
+
+  const index = currentSlideIndex.value;
+  const videoEl = videoRefs.value[index];
+
+  if (videoEl) {
+    try {
+      await videoEl.play();
+    } catch (e) {
+      console.error(`Failed to play video at index ${index}:`, e);
     }
-  } else if (currentPlayingIndex.value === newIndex) {
   }
-  replayTargetIndex.value = null;
+};
+
+//swiper组件初始化
+const onSwiperInit = (swiper: SwiperType) => {
+  swiperInstance.value = swiper;
+  currentSlideIndex.value = swiper.realIndex; // 初始化当前索引
+  // 初始化加载状态和结束状态
+  mediaItems.value.forEach((_, i) => {
+    videoLoadStatus.value[i] = 'idle';
+    videoEndedState.value[i] = false;
+  });
+
+  // 如果用户已交互（例如页面加载后快速点击）且自动播放开启，则尝试播放
+  if (userHasInteracted.value && isAutoPlayEnabled.value) {
+    tryPlayCurrentVideo();
+  }
 };
 
 const onSlideTransitionStart = (swiper:any) => {
   currentMediaIndex.value = swiper?.realIndex || 0;
 };
 
-const toggleAutoPlay = () => {
-  isAutoPlayEnabled.value = !isAutoPlayEnabled.value;
-  if(isAutoPlayEnabled.value){
-    const swiperEl = document.querySelector('.my-swiper');
-    if (swiperEl) {
-      const instance = (swiperEl as any).swiper;
-      if (instance) {
-        const currentIndex = instance.realIndex;
-        currentPlayingIndex.value = null;
-        nextTick(() => {
-          currentPlayingIndex.value = currentIndex;
-          replayTargetIndex.value = currentIndex;
-        });
-      }
-    }
-  }
-}; 
+//swiper切换事件
+const onSlideChange = (swiper: SwiperType) => {
+  const previousIndex = currentSlideIndex.value;
+  currentSlideIndex.value = swiper.realIndex;
 
+  //卡片切换时，停止前一个视频
+  const previousVideoEl = videoRefs.value[previousIndex];
+  if (previousVideoEl) {
+    previousVideoEl.pause();
+    // 重置到开头，以便下次播放
+    previousVideoEl.currentTime = 0;
+  }
+  // 清除前一个视频的结束状态
+  videoEndedState.value[previousIndex] = false;
+
+  // 如果用户已交互且自动播放开启，则尝试播放新幻灯片的视频
+  if (userHasInteracted.value && isAutoPlayEnabled.value) {
+    tryPlayCurrentVideo();
+  }
+    
+  if(isMenuOpen.value){
+    isMenuOpen.value = false;
+  }
+};
+
+const onVideoCanPlay = (index: number) => {
+  videoLoadStatus.value[index] = 'loaded';
+};
+
+const onVideoError = (index: number) => {
+  videoLoadStatus.value[index] = 'error';
+  if (replayTargetIndex.value === index) {
+      replayTargetIndex.value = null;
+  }
+};
+
+//视频播放结束
 const onVideoEnded = (index: number) => {
-  if (currentPlayingIndex.value === index) {
-    currentPlayingIndex.value = null;
-    replayTargetIndex.value = null;
-  }
+  videoEndedState.value[index] = true;
 };
 
-const replayCurrentMedia = () => {
-  const swiperEl = document.querySelector('.my-swiper');
-  if (swiperEl) {
-    const instance = (swiperEl as any).swiper;
-    if (instance) {
-      const currentIndex = instance.realIndex;
-      currentPlayingIndex.value = null;
-      nextTick(() => {
-        currentPlayingIndex.value = currentIndex;
-        replayTargetIndex.value = currentIndex;
-      });
+//视频重播
+const replayCurrentMedia = async () => {
+  // 1. 取消任何正在进行的重播
+  if (replayAbortController) {
+    replayAbortController.abort();
+  }
+  replayAbortController = new AbortController();
+  const controllerSignal = replayAbortController.signal;
+
+  const index = currentSlideIndex.value;
+  const videoEl = videoRefs.value[index];
+
+  if (!videoEl) {
+    return;
+  }
+
+  if (videoLoadStatus.value[index] === 'error') {
+    return;
+  }
+
+  userHasInteracted.value = true; // 强制标记用户已交互
+
+  videoEl.currentTime = 0;
+  videoEndedState.value[index] = false; // 清除结束标志
+
+  try {
+    await videoEl.play();
+  } catch (e) {
+    if (controllerSignal.aborted) {
+      console.log("Replay attempt was aborted.");
+    } else {
+      console.error(`Failed to replay video at index ${index} via button click:`, e);
     }
   }
 };
+
 
 const toggleMenu = () => {
   isMenuOpen.value = !isMenuOpen.value;
 };
 
 const handleCloseMenu = (event: MouseEvent) => {
-  const target = event.target as HTMLElement;
-  if (!target.closest('.menu-toggle') && !target.closest('.dot-container')) {
+  const menuToggle = document.querySelector('.menu-toggle');
+  const menu = document.querySelector('.menu');
+  if (
+    isMenuOpen.value &&
+    menu &&
+    !menu.contains(event.target as Node) &&
+    menuToggle &&
+    !menuToggle.contains(event.target as Node)
+  ) {
     isMenuOpen.value = false;
+  }
+};
+
+//自动播放开启/关闭
+const toggleAutoPlay = () => {
+  const wasEnabled = isAutoPlayEnabled.value;
+  isAutoPlayEnabled.value = !isAutoPlayEnabled.value;
+
+  if (!isAutoPlayEnabled.value) {
+    // 关闭自动播放 -> 停止当前视频，显示图片
+    const currentIndex = currentSlideIndex.value;
+    // 修正：使用数组方式获取视频元素，并进行类型检查
+    const videoEl = videoRefs.value[currentIndex];
+    if (videoEl) {
+      videoEl.pause();
+      videoEl.currentTime = 0;
+    }
+    // 不清除 videoEndedState，因为切换回来时 shouldShowVideo 会重新评估
+  } else if (!wasEnabled && userHasInteracted.value) { // 从关闭变为开启
+    // 开启自动播放 -> 如果用户已交互，尝试播放当前视频
+    tryPlayCurrentVideo();
   }
 };
 
 onMounted(() => {
   document.addEventListener('click', handleCloseMenu);
+  mediaItems.value.forEach((_, i) => {
+    videoLoadStatus.value[i] = 'idle';
+  });
 });
 
-onMounted(() => {
+onUnmounted(() => {
   document.removeEventListener('click', handleCloseMenu);
+  // 组件卸载时清理控制器
+  if (replayAbortController) {
+    replayAbortController.abort();
+  }
+  videoRefs.value.forEach(video => {
+    if (video) {
+      video.pause();
+    }
+  });
 });
 </script>
 
 <template>
   <div class="main-container" :class="[currentMediaIndex === 0 ? 'main-container1' : 'main-container2']">
     <div class=text-top>2026</div>
-    <swiper class="my-swiper" 
+    <swiper 
+      class="my-swiper" 
       :pagination="{ clickable: true }"
       :modules="modules" 
       loop
       :space-between="0"
       @slideChangeTransitionEnd="onSlideChange"
       @slideChangeTransitionStart="onSlideTransitionStart"
+      @touch-start="onUserInteraction"
+      @click="onUserInteraction"
+      @init="onSwiperInit"
     >
       <swiper-slide class="swiper-slide" v-for="(item, index) in mediaItems" :key="index">
         <img 
           alt="heka"
           class="media-item"
-          v-if="shouldShowImage(index)"
+          v-show="!shouldShowVideo(index)"
           :src="item.imageSrc"
         />
         <video  
           autoplay
           muted
+          ref="videoRefs"
           class="media-item"
           playsinline
-          v-else
+          webkit-playsinline 
+          x5-playsinline 
+          x5-video-player-type="h5"
+          x5-video-orientation="portraint"
+          preload="auto"
+          v-show="shouldShowVideo(index)"
           :src="item.videoSrc"
           @ended="onVideoEnded(index)"
+          @canplay="onVideoCanPlay(index)"
+          @error="onVideoError(index)"
         ></video>
       </swiper-slide>
     </swiper>
